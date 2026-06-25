@@ -2,6 +2,9 @@
 Copyright © IQ.Lvbs, apart of Project Teal Lvbs, All Rights Reserved, licensed under https://konn3kt.com/tos
 
 Original concept and implementation by SpysyWeeb (github.com/SpysyWeeb)
+
+Enabled together with Force Stops (IQForceStops): the landing law runs on every
+stop, so a forced stop at a sign or light also lands smoothly.
 """
 from opendbc.car.interfaces import ACCEL_MIN
 from openpilot.common.params import Params
@@ -35,7 +38,9 @@ SETTLE_JERK_LIMIT = 2.5    # m/s^3
 
 
 def read_smooth_stops_enabled(params: Params) -> bool:
-  return params.get_bool("IQSmoothStops")
+  # Smooth landing is part of Force Stops now: one toggle (IQForceStops) both
+  # forces a stop where it belongs and feathers every stop to a gentle landing.
+  return params.get_bool("IQForceStops")
 
 
 class SmoothStops:

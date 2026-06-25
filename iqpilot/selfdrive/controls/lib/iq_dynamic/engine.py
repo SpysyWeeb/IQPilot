@@ -18,6 +18,7 @@ from openpilot.iqpilot.selfdrive.controls.lib.iq_dynamic.imahelper import (
   IQ_DYNAMIC_CONDITIONAL_SPEED_PARAM,
   IQ_DYNAMIC_CONDITIONAL_STOPPED_LEAD_PARAM,
   IQ_DYNAMIC_MODE_PARAM,
+  IQ_DYNAMIC_MINIMUM_FORCE_STOP_LENGTH_PARAM,
   IQ_DYNAMIC_MODEL_STOP_TIME_PARAM,
   IQ_FORCE_STOPS_PARAM,
   compute_slowdown_need,
@@ -77,6 +78,7 @@ class IQDynamicController:
     self.conditional_speed = IQConstants.CONDITIONAL_SPEED_DEFAULT
     self.conditional_lead_speed = IQConstants.CONDITIONAL_LEAD_SPEED_DEFAULT
     self.model_stop_time = IQConstants.MODEL_STOP_TIME_DEFAULT
+    self.minimum_force_stop_length = IQConstants.MINIMUM_FORCE_STOP_LENGTH_DEFAULT
 
   def _read_bool(self, key: str, default: bool) -> bool:
     value = self.IQParams.get_bool(key)
@@ -105,6 +107,7 @@ class IQDynamicController:
     self.conditional_speed = self._read_float(IQ_DYNAMIC_CONDITIONAL_SPEED_PARAM, IQConstants.CONDITIONAL_SPEED_DEFAULT)
     self.conditional_lead_speed = self._read_float(IQ_DYNAMIC_CONDITIONAL_LEAD_SPEED_PARAM, IQConstants.CONDITIONAL_LEAD_SPEED_DEFAULT)
     self.model_stop_time = self._read_float(IQ_DYNAMIC_MODEL_STOP_TIME_PARAM, IQConstants.MODEL_STOP_TIME_DEFAULT)
+    self.minimum_force_stop_length = self._read_float(IQ_DYNAMIC_MINIMUM_FORCE_STOP_LENGTH_PARAM, IQConstants.MINIMUM_FORCE_STOP_LENGTH_DEFAULT)
     self.force_stops_enabled = self._read_bool(IQ_FORCE_STOPS_PARAM, True)
 
   def set_slc_experimental_mode(self, active: bool) -> None:

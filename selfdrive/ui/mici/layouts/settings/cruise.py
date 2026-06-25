@@ -39,7 +39,6 @@ class DynamicSettingsPanel(NavScroller):
       MappedParamToggle("IQ.Dynamic Lead Speed", "IQDynamicConditionalLeadSpeed", _LEAD_SPEED_OPTIONS, _LEAD_SPEED_VALUES),
       MappedParamToggle("Model Stop Time", "IQDynamicModelStopTime", _STOP_TIME_OPTIONS, _STOP_TIME_VALUES),
       BigParamControl("IQ Force Stops", "IQForceStops"),
-      SafeParamControl("IQ Smooth Stops", "IQSmoothStops"),
     ]
     self._scroller.add_widgets(self._items)
 

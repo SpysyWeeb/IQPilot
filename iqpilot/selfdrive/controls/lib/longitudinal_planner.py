@@ -131,33 +131,6 @@ class LongitudinalPlannerIQ:
     force_stop = self.iq_dynamic.force_stop_requested() and apply_enabled and self.override_force_stop_timer <= 0.0
     self.force_stop_timer = self.force_stop_timer + DT_MDL if force_stop else 0.0
     force_stop_enabled = self.force_stop_timer >= 1.0
-
-    accel_pressed = bool(getattr(sm["iqCarState"], "accelPressed", False))
-    self.override_force_stop |= sm["carState"].gasPressed or accel_pressed
-    self.override_force_stop &= force_stop_enabled
-
-    if self.override_force_stop:
-      self.override_force_stop_timer = 10.0
-    elif self.override_force_stop_timer > 0.0:
-      self.override_force_stop_timer = max(0.0, self.override_force_stop_timer - DT_MDL)
-    else:
-      self.override_force_stop = False
-
-    if force_stop_enabled and not self.override_force_stop:
-      self.forcing_stop = True
-      self.tracked_model_length = max(self.tracked_model_length - (v_ego * DT_MDL), 0.0)
-      if sm["carState"].standstill:
-        return 0.0
-      return min(self.tracked_model_length / IQConstants.FORCE_STOP_PLANNER_TIME, v_target)
-
-    self.forcing_stop = False
-    self.tracked_model_length = max(self.iq_dynamic.model_length, 0.0)
-    return v_target
-
-  def _apply_force_stop(self, v_target: float, v_ego: float, sm: messaging.SubMaster, apply_enabled: bool) -> float:
-    force_stop = self.iq_dynamic.force_stop_requested() and apply_enabled and self.override_force_stop_timer <= 0.0
-    self.force_stop_timer = self.force_stop_timer + DT_MDL if force_stop else 0.0
-    force_stop_enabled = self.force_stop_timer >= 1.0
     force_stop_ramp_time = max(float(getattr(self.iq_dynamic, "model_stop_time", IQConstants.FORCE_STOP_PLANNER_TIME)), DT_MDL)
 
     accel_pressed = bool(getattr(sm["iqCarState"], "accelPressed", False))

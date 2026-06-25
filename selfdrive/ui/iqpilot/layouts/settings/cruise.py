@@ -184,14 +184,10 @@ class CruiseLayout(Widget):
       ),
       self._toggle_item(
         "IQ Force Stops",
-        "Use the model stop prediction to force a stop for stop signs and stop lights unless overridden with the accelerator.",
+        "Bring the car to a complete stop for stop signs and stop lights, and feather the brake in the final meters of "
+        "every stop so it settles gently instead of rocking on its suspension. Yields full braking authority when a lead "
+        "is close. Override with the accelerator.",
         "IQForceStops",
-      ),
-      self._toggle_item(
-        "IQ Smooth Stops",
-        "Feather the brake in the final meters of a stop. Caps deceleration proportional to speed below 3.5 m/s so the car "
-        "settles gently instead of rocking on its suspension. Automatically yields full braking authority when a lead is close.",
-        "IQSmoothStops",
       ),
     ]
     return items

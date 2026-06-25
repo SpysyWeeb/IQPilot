@@ -13,6 +13,7 @@ IQ_DYNAMIC_CONDITIONAL_SLC_FALLBACK_PARAM = "IQDynamicConditionalSLCFallback"
 IQ_DYNAMIC_CONDITIONAL_SPEED_PARAM = "IQDynamicConditionalSpeed"
 IQ_DYNAMIC_CONDITIONAL_LEAD_SPEED_PARAM = "IQDynamicConditionalLeadSpeed"
 IQ_DYNAMIC_MODEL_STOP_TIME_PARAM = "IQDynamicModelStopTime"
+IQ_DYNAMIC_MINIMUM_FORCE_STOP_LENGTH_PARAM = "IQDynamicMinimumForceStopLength"
 IQ_FORCE_STOPS_PARAM = "IQForceStops"
 
 
@@ -33,6 +34,7 @@ class IQConstants:
   MODEL_STOP_THRESHOLD = 0.55
   SLOW_LEAD_THRESHOLD = 0.55
   FORCE_STOP_PLANNER_TIME = 3.0
+  MINIMUM_FORCE_STOP_LENGTH_DEFAULT = 0.0
 
 
 def compute_slowdown_need(kph: float, horizon_dist: float, desired_dist: float) -> float:
