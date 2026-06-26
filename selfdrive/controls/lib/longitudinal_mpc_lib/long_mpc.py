@@ -61,6 +61,12 @@ CRUISE_MIN_ACCEL = -1.2
 CRUISE_MAX_ACCEL = 2.0
 MIN_X_LEAD_FACTOR = 0.5
 
+# Lead-launch / pull-away assist (newLeadMpc): when radar confirms the lead is
+# opening the gap and not braking, floor the predicted lead trajectory so a noisy
+# model prediction can't invent a slowdown and trigger a phantom brake at launch.
+LEAD_PULLAWAY_VREL = 0.5     # m/s, gap must be opening at least this fast (vLead - vEgo)
+LEAD_PULLAWAY_ABRAKE = -0.5  # m/s^2, release the floor if the lead brakes harder than this
+
 def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
     return 1.0
@@ -349,6 +355,18 @@ class LongitudinalMpc:
 
     x_lead_mpc = np.maximum.accumulate(np.interp(T_IDXS, LEAD_T_IDXS_MODEL, x_lead_traj))
     v_lead_mpc = np.interp(T_IDXS, LEAD_T_IDXS_MODEL, v_lead_traj)
+
+    if (radar_lead.status and radar_lead.vRel > LEAD_PULLAWAY_VREL
+            and radar_lead.aLeadK > LEAD_PULLAWAY_ABRAKE):
+      # Lead is positively pulling away: don't let a noisy model delta predict it
+      # falling back and trigger a phantom brake. Floor at a constant-velocity radar
+      # extrapolation (a safe lower bound on a faster, non-braking lead) — this only
+      # raises x/v (pushes the obstacle out), never pulls it in, and releases the
+      # frame the gap stops opening or the lead brakes, so it can't mask a slowdown.
+      v_floor = np.full_like(T_IDXS, float(radar_lead.vLead))
+      x_floor = float(radar_lead.dRel) + float(radar_lead.vLead) * T_IDXS
+      v_lead_mpc = np.maximum(v_lead_mpc, v_floor)
+      x_lead_mpc = np.maximum(x_lead_mpc, x_floor)
     return np.column_stack((x_lead_mpc, v_lead_mpc))
 
   def update(self, v_cruise, modelV2, radarstate, personality=log.LongitudinalPersonality.standard):
