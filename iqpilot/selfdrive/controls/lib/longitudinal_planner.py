@@ -12,7 +12,6 @@ from openpilot.iqpilot.selfdrive.controls.lib.iq_dynamic.engine import IQDynamic
 from openpilot.iqpilot.selfdrive.controls.lib.iq_dynamic.imahelper import IQConstants
 from openpilot.iqpilot.selfdrive.controls.lib.helpers.e2e_alerts import E2EAlertsHelper
 from openpilot.iqpilot.selfdrive.controls.lib.slc_vcruise import SLCVCruise
-from openpilot.iqpilot.selfdrive.controls.lib.smooth_stops import SmoothStops
 from openpilot.iqpilot.selfdrive.selfdrived.events import IQEvents
 from openpilot.iqpilot.models.helpers import get_active_bundle
 
@@ -29,7 +28,6 @@ class LongitudinalPlannerIQ:
     self.events_iq = IQEvents()
     self.iq_dynamic = IQDynamicController(CP, mpc)
     self.slc = SLCVCruise()
-    self.smooth_stops = SmoothStops()
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
     self.source = LongitudinalPlanSource.cruise
     self.e2e_alerts_helper = E2EAlertsHelper()
@@ -114,13 +112,8 @@ class LongitudinalPlannerIQ:
     self.output_v_target = self._apply_force_stop(self.output_v_target, v_ego, sm, slc_apply_enabled)
     return self.output_v_target, self.output_a_target
 
-  def apply_smooth_stops(self, sm: messaging.SubMaster, v_ego: float, a_target: float) -> float:
-    plan_min_v = float(min(self.v_desired_trajectory))
-    return self.smooth_stops.apply(a_target, v_ego, sm['radarState'].leadOne, plan_min_v)
-
   def update(self, sm: messaging.SubMaster) -> None:
     self.events_iq.clear()
-    self.smooth_stops.update()
     for event_name in getattr(self.slc, 'pending_events', []):
       self.events_iq.add(event_name)
     self.e2e_alerts_helper.update(sm, self.events_iq)

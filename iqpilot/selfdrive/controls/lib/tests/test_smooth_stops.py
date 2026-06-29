@@ -3,34 +3,31 @@ Copyright © IQ.Lvbs, apart of Project Teal Lvbs, All Rights Reserved, licensed 
 
 Original concept and implementation by SpysyWeeb (github.com/SpysyWeeb)
 """
-from types import SimpleNamespace
-
+from openpilot.common.realtime import DT_CTRL
 from openpilot.iqpilot.selfdrive.controls.lib.smooth_stops import (
-  SmoothStops,
-  ACTIVATION_SPEED,
-  SMOOTHNESS_K,
-  SMOOTHNESS_C,
-  CREEP_FLOOR_DECEL,
+  SmoothStopController,
   read_smooth_stops_enabled,
+  STANDSTILL_SPEED,
+  STANDSTILL_HOLD_SPEED,
+  SETTLE_DECEL,
+  TAPER_SPEED,
+  STOP_KISS_DECEL,
+  SETTLE_JERK,
+  EMERGENCY_DECEL,
 )
 
-
-def _lead(status=False, dRel=100.0, vLead=0.0):
-  return SimpleNamespace(status=status, dRel=dRel, vLead=vLead)
+JERK_STEP = SETTLE_JERK * DT_CTRL
 
 
 def _build(enabled=True):
-  ss = SmoothStops.__new__(SmoothStops)
-  ss.enabled = enabled
-  ss.active = False
-  ss._v_min = float("inf")
-  ss._stall_frames = 0
-  return ss
+  c = SmoothStopController.__new__(SmoothStopController)
+  c.enabled = enabled
+  c._v_min = float("inf")
+  c._stall_s = 0.0
+  return c
 
 
 def test_unified_toggle_reads_force_stops():
-  # Smooth landing is part of Force Stops now: it follows IQForceStops, not a
-  # separate IQSmoothStops toggle.
   seen = {}
 
   class FakeParams:
@@ -42,45 +39,75 @@ def test_unified_toggle_reads_force_stops():
   assert seen["key"] == "IQForceStops"
 
 
-def test_softens_surplus_braking_on_no_lead_stop():
-  ss = _build(enabled=True)
-  v_ego = 2.0
-  out = ss.apply(a_target=-3.0, v_ego=v_ego, lead_one=_lead(status=False), plan_min_v=0.0)
-  # surplus braking is capped to the exponential landing law
-  assert out == -(SMOOTHNESS_K * v_ego + SMOOTHNESS_C)
-  assert ss.active
+def test_hold_only_arms_at_standstill():
+  c = _build()
+  # still rolling -> never arm the clamp (this is the headbang we are killing)
+  assert not c.want_hold(True, 0.5, False)
+  assert not c.want_hold(True, STANDSTILL_SPEED + 0.05, False)
+  # the car asserting standstill while still moving must NOT arm the hold (clamp-while-moving)
+  assert not c.want_hold(True, 1.0, True)
+  assert not c.want_hold(True, STANDSTILL_HOLD_SPEED + 0.05, True)
+  # at/below standstill speed, or standstill asserted once essentially stopped -> ok to clamp/hold
+  assert c.want_hold(True, STANDSTILL_SPEED - 0.01, False)
+  assert c.want_hold(True, STANDSTILL_HOLD_SPEED - 0.01, True)
+  # not trying to stop -> never hold
+  assert not c.want_hold(False, 0.0, True)
 
 
-def test_creep_floor_guarantees_decel_near_standstill():
-  ss = _build(enabled=True)
-  out = ss.apply(a_target=-0.05, v_ego=0.5, lead_one=_lead(status=False), plan_min_v=0.0)
-  # never coast against transmission creep torque in the final crawl
-  assert out <= -CREEP_FLOOR_DECEL
-  assert ss.active
+def test_settle_feathers_toward_baseline():
+  c = _build()
+  # gentle plan, lots of room: command eases from 0 toward -SETTLE_DECEL one jerk step at a time
+  out = c.settle(a_target=0.0, v_ego=1.0, lead_distance=0.0, has_lead=False, last_output=0.0)
+  assert out == -JERK_STEP
 
 
-def test_no_op_when_disabled():
-  ss = _build(enabled=False)
-  out = ss.apply(a_target=-3.0, v_ego=2.0, lead_one=_lead(status=False), plan_min_v=0.0)
-  assert out == -3.0
-  assert not ss.active
+def test_settle_never_softer_than_mpc():
+  c = _build()
+  # MPC wants firm -2.0; settle must not under-brake -- it ramps toward the MPC target
+  out = c.settle(a_target=-2.0, v_ego=1.0, lead_distance=0.0, has_lead=False, last_output=-1.0)
+  assert out == -1.0 - JERK_STEP
+  assert out < -1.0
 
 
-def test_no_op_above_activation_speed():
-  ss = _build(enabled=True)
-  out = ss.apply(a_target=-3.0, v_ego=ACTIVATION_SPEED + 1.0, lead_one=_lead(status=False), plan_min_v=0.0)
-  assert out == -3.0
+def test_settle_emergency_bypasses_jerk_limit():
+  c = _build()
+  # at/below the emergency decel (true collision) the command is applied immediately
+  out = c.settle(a_target=-3.4, v_ego=2.0, lead_distance=0.0, has_lead=False, last_output=0.0)
+  assert out == -3.4
+  assert out <= -EMERGENCY_DECEL
 
 
-def test_no_op_when_plan_is_not_stopping():
-  ss = _build(enabled=True)
-  # plan bottoms out above the stop-intent speed: this is a slowdown, not a stop
-  out = ss.apply(a_target=-3.0, v_ego=2.0, lead_one=_lead(status=False), plan_min_v=5.0)
-  assert out == -3.0
+def test_settle_lead_firms_up_when_close():
+  # far lead: the gentle baseline governs
+  c = _build()
+  assert c.settle(a_target=0.0, v_ego=1.0, lead_distance=50.0, has_lead=True, last_output=-SETTLE_DECEL) == -SETTLE_DECEL
+  # close lead, still moving: the decel required to stop in the gap governs (firmer)
+  # gap = max(3.0 - STOP_GAP_MARGIN, MIN_GAP_BUDGET) = 0.5 -> a_req = v^2/(2*0.5) = 1.0
+  c = _build()
+  assert c.settle(a_target=0.0, v_ego=1.0, lead_distance=3.0, has_lead=True, last_output=-1.0) == -1.0
 
 
-def test_close_lead_keeps_full_braking_authority():
-  ss = _build(enabled=True)
-  out = ss.apply(a_target=-3.0, v_ego=2.0, lead_one=_lead(status=True, dRel=3.0, vLead=0.0), plan_min_v=0.0)
-  # within MIN_LEAD_DISTANCE the cap turns transparent so the gap is never starved
-  assert out == -3.0
+def test_settle_anti_creep_firms_up_when_not_slowing():
+  c = _build()
+  out = c.settle(a_target=0.0, v_ego=0.5, lead_distance=0.0, has_lead=False, last_output=-SETTLE_DECEL)
+  # hold the same speed (creep): the controller should ramp firmer than baseline over time
+  for _ in range(60):
+    out = c.settle(a_target=0.0, v_ego=0.5, lead_distance=0.0, has_lead=False, last_output=out)
+  assert out < -SETTLE_DECEL
+
+
+def test_settle_eases_off_near_stop():
+  # the limo "roll to a stop": the brake eases off as v -> 0, so less braking near the stop
+  c = _build()
+  near = c.settle(a_target=0.0, v_ego=0.1, lead_distance=0.0, has_lead=False, last_output=-0.305)
+  c = _build()
+  high = c.settle(a_target=0.0, v_ego=0.9, lead_distance=0.0, has_lead=False, last_output=-0.745)
+  assert near > high  # gentler (less negative) deceleration near the stop
+  assert near == -(STOP_KISS_DECEL + (SETTLE_DECEL - STOP_KISS_DECEL) * (0.1 / TAPER_SPEED))
+
+
+def test_settle_kiss_decel_at_stop():
+  # right at the stop only the gentle kiss decel remains (not the full -SETTLE_DECEL)
+  c = _build()
+  out = c.settle(a_target=0.0, v_ego=0.0, lead_distance=0.0, has_lead=False, last_output=-STOP_KISS_DECEL)
+  assert out == -STOP_KISS_DECEL

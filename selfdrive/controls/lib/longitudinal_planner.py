@@ -180,7 +180,9 @@ class LongitudinalPlanner(LongitudinalPlannerIQ):
 
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
-    self.output_a_target = np.clip(self.apply_smooth_stops(sm, v_ego, output_a_target), accel_clip[0], accel_clip[1])
+    # Smooth Stops now shapes the stop in longcontrol (settle feather), not by capping
+    # a_target here -- the planner just hands down the MPC's lead-aware target.
+    self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
     self.prev_accel_clip = accel_clip
 
   def publish(self, sm, pm):

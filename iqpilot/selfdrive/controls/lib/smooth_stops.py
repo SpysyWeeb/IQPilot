@@ -2,150 +2,119 @@
 Copyright © IQ.Lvbs, apart of Project Teal Lvbs, All Rights Reserved, licensed under https://konn3kt.com/tos
 
 Original concept and implementation by SpysyWeeb (github.com/SpysyWeeb)
+
+Smooth Stops (rewrite). The smooth landing is produced entirely in longcontrol, at
+control rate, by feathering the brake all the way down to a *true* standstill and
+only then handing off to the standstill hold clamp. Enabled together with Force Stops
+(one toggle, IQForceStops). See SmoothStopController for the rationale.
 """
 from opendbc.car.interfaces import ACCEL_MIN
 from openpilot.common.params import Params
-from openpilot.common.realtime import DT_CTRL, DT_MDL
+from openpilot.common.realtime import DT_CTRL
 from openpilot.iqpilot import PARAMS_UPDATE_PERIOD
 
-ACTIVATION_SPEED = 3.5   # m/s, cap is computed below this; near no-op at the top end
-STOP_INTENT_SPEED = 0.5  # m/s, plan must reach below this to count as a stop
-MIN_LEAD_DISTANCE = 5.0  # m, full braking authority when a lead is closer than this
-LEAD_STOP_MARGIN = 4.0   # m, never block the braking required to stop this far behind the lead
+# --- handoff to the hold clamp ---
+STANDSTILL_SPEED = 0.05        # m/s, arm the stopping/hold clamp once the car is essentially stopped
+STANDSTILL_HOLD_SPEED = 0.15   # m/s, ceiling for trusting CS.standstill -- never arm the hold above this,
+                               # so the car's own standstill signal can't clamp down while still rolling
 
-SMOOTHNESS_K = 0.70  # [1/s], landing time constant
-SMOOTHNESS_C = 0.30  # [m/s^2], residual decel at standstill
-
-LINGER_SPEED = 0.5  # m/s (~1.1 mph), absolute backstop: arms clamp-to-stop as last resort
-LINGER_TIME = 1.0   # s, how long to crawl before the clamp is allowed to finish the stop
-
-# creep floor: below CREEP_FLOOR_SPEED, nudge a_target to at least -CREEP_FLOOR_DECEL.
-# Prevents the car from coasting when the MPC is too gentle to overcome transmission
-# creep torque — no sudden clamp, just guaranteed consistent deceleration.
-CREEP_FLOOR_SPEED = 1.0   # m/s (~2.2 mph), below this enforce minimum commanded decel
-CREEP_FLOOR_DECEL = 0.40  # m/s^2, minimum commanded decel at creep speeds
-
-# progress watchdog: while the cap is limiting braking, the car must keep slowing.
-# If speed stops decreasing, release the cap progressively until it does
-STALL_TIME = 1.0           # s, no progress for this long starts releasing the cap
-STALL_PROGRESS = 0.02      # m/s, minimum speed reduction to count as progress
-STALL_RELEASE_RATE = 0.15  # m/s^2 of additional allowed braking per second of stall
-SETTLE_SMOOTH_SPEED = 1.5  # m/s, jerk-limit the PID output below this
-SETTLE_JERK_LIMIT = 2.5    # m/s^3
+# --- the settle feather: a controlled deceleration to a true stop ---
+SETTLE_DECEL = 0.80       # m/s^2, decel while feathering down from the approach (>= TAPER_SPEED)
+TAPER_SPEED = 1.0         # m/s (~2.2 mph), below this ease the brake off toward the stop (limo roll-to-stop)
+STOP_KISS_DECEL = 0.25    # m/s^2, gentle residual decel right at the stop -> small step -> minimal end jerk
+STOP_GAP_MARGIN = 3.0     # m, settle brakes to stop at least this far behind the lead (anti-creep-in)
+MIN_GAP_BUDGET = 0.5      # m, lower bound on the gap budget; bounds required decel as the gap -> 0
+PROGRESS_EPS = 0.02       # m/s, speed drop (vs the running minimum) that counts as "still slowing"
+ANTI_CREEP_RATE = 0.50    # m/s^2 added per second the car is NOT slowing (kills creep / held creep)
+SETTLE_JERK = 2.5         # m/s^3, smoothness of the brake command itself
+EMERGENCY_DECEL = 3.0     # m/s^2, at/below -this the jerk limit is dropped (true-collision bypass)
 
 
 def read_smooth_stops_enabled(params: Params) -> bool:
-  # Smooth landing is part of Force Stops now: one toggle (IQForceStops) both
-  # forces a stop where it belongs and feathers every stop to a gentle landing.
+  # Smooth landing is part of Force Stops: one toggle (IQForceStops).
   return params.get_bool("IQForceStops")
 
 
-class SmoothStops:
+class SmoothStopController:
+  """
+  Owns the final approach to a stop, inside longcontrol (control rate, true v_ego).
+
+  The harsh "headbang" stop is the stock handoff: the moment the plan's speed drops
+  below vEgoStopping, the state machine jumps to the `stopping` state and ramps the
+  command to stopAccel (-2.0 m/s^2) -- while the car is usually still rolling. This
+  controller instead keeps the car in a closed-loop *settle* feather that decelerates
+  it smoothly to a true standstill, and only lets the hold clamp engage once stopped:
+
+    settle()    -- command a gentle baseline decel; firm up toward the decel required to
+                   stop behind the lead (lead-aware "how swiftly"); ramp firmer still if
+                   the car stops making progress (anti-creep). Never brake softer than the
+                   MPC's plan (collision safety) and jerk-limit the command so the brake
+                   never steps -- except at/below EMERGENCY_DECEL, applied immediately.
+    want_hold() -- arm the stopping/hold clamp only once v_ego is at/below STANDSTILL_SPEED
+                   (or the car reports standstill), so the clamp lands on a stopped car.
+
+  Knobs (SETTLE_DECEL gentleness, EMERGENCY_DECEL bailout) are conservative defaults to
+  be tuned on-device.
+  """
   def __init__(self):
     self.params = Params()
     self.frame = 0
     self.enabled = False
-    self.active = False
     self._v_min = float("inf")
-    self._stall_frames = 0
+    self._stall_s = 0.0
     self.read_params()
-
-  def _reset_watchdog(self) -> None:
-    self._v_min = float("inf")
-    self._stall_frames = 0
 
   def read_params(self) -> None:
     self.enabled = read_smooth_stops_enabled(self.params)
 
   def update(self) -> None:
-    if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
+    if self.frame % int(PARAMS_UPDATE_PERIOD / DT_CTRL) == 0:
       self.read_params()
     self.frame += 1
 
-  def apply(self, a_target: float, v_ego: float, lead_one, plan_min_v: float) -> float:
-    self.active = False
+  def reset(self) -> None:
+    self._v_min = float("inf")
+    self._stall_s = 0.0
 
-    if not self.enabled or a_target >= 0. or v_ego > ACTIVATION_SPEED:
-      self._reset_watchdog()
-      return a_target
-    if plan_min_v > STOP_INTENT_SPEED:
-      self._reset_watchdog()
-      return a_target
+  def want_hold(self, should_stop: bool, v_ego: float, standstill: bool) -> bool:
+    # Arm the stopping/hold clamp only once the car is actually stopped, so it never
+    # clamps down while still rolling (the headbang). CS.standstill is only a backstop for
+    # a noisy v_ego near zero -- it is NOT trusted to arm the hold while the car is still
+    # moving (some cars, incl. the Palisade, assert standstill a hair early), hence the
+    # STANDSTILL_HOLD_SPEED ceiling.
+    return bool(should_stop and (v_ego <= STANDSTILL_SPEED or (standstill and v_ego <= STANDSTILL_HOLD_SPEED)))
 
-    brake_floor = -(SMOOTHNESS_K * v_ego + SMOOTHNESS_C)
+  def settle(self, a_target: float, v_ego: float, lead_distance: float, has_lead: bool, last_output: float) -> float:
+    # Ease the brake off as v -> 0 so deceleration nearly vanishes at the moment of stopping
+    # -- the limo "roll to a stop" (release pressure before the wheels stop). A small kiss
+    # decel remains so the car still reaches 0 against creep torque; the firm baseline
+    # returns above TAPER_SPEED.
+    landing = STOP_KISS_DECEL + (SETTLE_DECEL - STOP_KISS_DECEL) * min(v_ego / TAPER_SPEED, 1.0)
+    a_settle = -landing
 
-    if lead_one.status:
-      if lead_one.dRel < MIN_LEAD_DISTANCE:
-        self._reset_watchdog()
-        return a_target
-      closing = max(v_ego - lead_one.vLead, 0.0)
-      gap_budget = max(lead_one.dRel - LEAD_STOP_MARGIN, 0.5)
-      required = (closing ** 2) / (2.0 * gap_budget)
-      brake_floor = max(min(brake_floor, -required), ACCEL_MIN)
+    # lead-aware: brake hard enough to stop short of the lead (how swiftly to execute)
+    if has_lead and lead_distance > 0.0:
+      gap = max(lead_distance - STOP_GAP_MARGIN, MIN_GAP_BUDGET)
+      a_settle = min(a_settle, -(v_ego * v_ego) / (2.0 * gap))
 
-    if v_ego < self._v_min - STALL_PROGRESS:
+    # anti-creep: while the car is NOT actually slowing, firm up -- relative to the command,
+    # so the ease-off above is preserved whenever the car *is* still slowing (even slowly).
+    if v_ego < self._v_min - PROGRESS_EPS:
       self._v_min = v_ego
-      self._stall_frames = 0
+      self._stall_s = 0.0
     else:
-      self._stall_frames += 1
-    stalled_s = max(self._stall_frames * DT_MDL - STALL_TIME, 0.0)
-    if stalled_s > 0.0:
-      brake_floor = max(brake_floor - STALL_RELEASE_RATE * stalled_s, ACCEL_MIN)
+      self._stall_s += DT_CTRL
+    a_settle -= ANTI_CREEP_RATE * self._stall_s
 
-    if a_target < brake_floor:
-      self.active = True
-      a_target = brake_floor
+    a_settle = max(a_settle, ACCEL_MIN)
 
-    if v_ego < CREEP_FLOOR_SPEED:
-      creep_limit = -CREEP_FLOOR_DECEL
-      if a_target > creep_limit:
-        self.active = True
-        a_target = creep_limit
+    # never brake softer than the MPC's plan -- it owns collision avoidance
+    target = min(a_settle, a_target)
 
-    return a_target
+    # at/below the emergency decel this is a true-collision stop: apply it now, no feather
+    if target <= -EMERGENCY_DECEL:
+      return target
 
-
-class SmoothStopsLongControl:
-
-  def __init__(self):
-    self.params = Params()
-    self.frame = 0
-    self.enabled = False
-    self.linger_frames = 0
-    self.last_pid_output = 0.0
-
-  def update(self) -> None:
-    if self.frame % int(PARAMS_UPDATE_PERIOD / DT_CTRL) == 0:
-      self.enabled = read_smooth_stops_enabled(self.params)
-    self.frame += 1
-
-  def defer_stopping(self, should_stop: bool, standstill: bool, v_ego: float) -> bool:
-    if not self.enabled:
-      self.linger_frames = 0
-      return should_stop
-
-    if not should_stop or standstill:
-      self.linger_frames = 0
-      return should_stop
-
-    # if the light settle brake never closes the last bit to standstill, stop
-    # deferring and let the clamp finish the stop — the car must never keep
-    # rolling when it should be stopped
-    if v_ego < LINGER_SPEED:
-      self.linger_frames += 1
-      if self.linger_frames >= int(LINGER_TIME / DT_CTRL):
-        return True
-    else:
-      self.linger_frames = 0
-
-    return False
-
-  def smooth_pid_output(self, output_accel: float, v_ego: float) -> float:
-    if not self.enabled or v_ego > SETTLE_SMOOTH_SPEED:
-      self.last_pid_output = output_accel
-      return output_accel
-
-    step = SETTLE_JERK_LIMIT * DT_CTRL
-    output_accel = min(max(output_accel, self.last_pid_output - step), self.last_pid_output + step)
-    self.last_pid_output = output_accel
-    return output_accel
+    # otherwise feather the command so the brake itself never steps (persistent smoothing)
+    step = SETTLE_JERK * DT_CTRL
+    return min(max(target, last_output - step), last_output + step)
