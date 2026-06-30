@@ -8,6 +8,7 @@ from opendbc.car import structs
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
+from openpilot.iqpilot.selfdrive.controls.lib.custom_stop_distance import CustomStopDistance
 from openpilot.iqpilot.selfdrive.controls.lib.iq_dynamic.engine import IQDynamicController
 from openpilot.iqpilot.selfdrive.controls.lib.iq_dynamic.imahelper import IQConstants
 from openpilot.iqpilot.selfdrive.controls.lib.helpers.e2e_alerts import E2EAlertsHelper
@@ -27,6 +28,7 @@ class LongitudinalPlannerIQ:
   def __init__(self, CP: structs.CarParams, CP_IQ: structs.IQCarParams, mpc):
     self.events_iq = IQEvents()
     self.iq_dynamic = IQDynamicController(CP, mpc)
+    self.custom_stop_distance = CustomStopDistance()
     self.slc = SLCVCruise()
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
     self.source = LongitudinalPlanSource.cruise
@@ -116,9 +118,15 @@ class LongitudinalPlannerIQ:
     self.events_iq.clear()
     for event_name in getattr(self.slc, 'pending_events', []):
       self.events_iq.add(event_name)
+    self.custom_stop_distance.update()
     self.e2e_alerts_helper.update(sm, self.events_iq)
     if bool(getattr(sm["iqCarState"], "alcOverrideAlert", False)):
       self.events_iq.add(custom.IQOnroadEvent.EventName.steeringOverrideReengageAlc)
+
+  def apply_e2e_stop_distance(self, sm: messaging.SubMaster, v_ego: float, a_target: float, should_stop: bool) -> tuple[float, bool]:
+    if not self.is_e2e(sm):
+      return a_target, should_stop
+    return self.custom_stop_distance.adjust_e2e_stop(a_target, should_stop, v_ego, sm['modelV2'])
 
   def _apply_force_stop(self, v_target: float, v_ego: float, sm: messaging.SubMaster, apply_enabled: bool) -> float:
     force_stop = self.iq_dynamic.force_stop_requested() and apply_enabled and self.override_force_stop_timer <= 0.0

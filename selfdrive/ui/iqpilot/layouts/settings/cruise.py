@@ -57,6 +57,10 @@ class CruiseLayout(Widget):
     def seconds_label(value: float | int) -> str:
       return f"{float(value):.1f}s"
 
+    def distance_label(value: float | int) -> str:
+      value = int(value)
+      return "Stock" if value == 0 else f"{value:+d} m"
+
     items = [
       self._mode_item(
         "IQ Speed Limit Mode",
@@ -188,6 +192,16 @@ class CruiseLayout(Widget):
         "every stop so it settles gently instead of rocking on its suspension. Yields full braking authority when a lead "
         "is close. Override with the accelerator.",
         "IQForceStops",
+      ),
+      self._option_item(
+        "IQ Custom Stop Distance",
+        "Nudge how far back IQ.Pilot stops behind a stopped lead vehicle or a model-held stop (red light). Positive "
+        "stops further back, negative settles in closer. Works whether IQ Force Stops is on or off.",
+        "IQCustomStopDistance",
+        -2,
+        2,
+        step=1,
+        label_callback=distance_label,
       ),
     ]
     return items

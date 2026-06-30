@@ -15,6 +15,7 @@ from openpilot.common.simple_kalman import KF1D
 from opendbc.car import structs
 from opendbc.car.hyundai.values import HyundaiFlags
 from opendbc.iqpilot.car.hyundai.values import HyundaiFlagsIQ
+from openpilot.iqpilot.selfdrive.controls.lib.custom_stop_distance import CustomStopDistance
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -215,9 +216,12 @@ class RadarD:
 
     self.ready = False
 
+    self.custom_stop_distance = CustomStopDistance()
+
   def update(self, sm: messaging.SubMaster, rr: car.RadarData):
     self.ready = sm.seen['modelV2']
     self.current_time = 1e-9*max(sm.logMonoTime.values())
+    self.custom_stop_distance.update()
 
     if sm.recv_frame['carState'] != self.last_v_ego_frame:
       self.v_ego = sm['carState'].vEgo
@@ -256,8 +260,10 @@ class RadarD:
       model_v_ego = self.v_ego
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.CP, self.CP_IQ, low_speed_override=True)
-      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.CP, self.CP_IQ, low_speed_override=False)
+      lead_one = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.CP, self.CP_IQ, low_speed_override=True)
+      lead_two = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.CP, self.CP_IQ, low_speed_override=False)
+      self.radar_state.leadOne = self.custom_stop_distance.apply_lead(lead_one)
+      self.radar_state.leadTwo = self.custom_stop_distance.apply_lead(lead_two)
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
